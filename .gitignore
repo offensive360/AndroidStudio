@@ -1,6 +1,7 @@
 .gradle/
 build/
 .idea/
+.intellijPlatform/
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar

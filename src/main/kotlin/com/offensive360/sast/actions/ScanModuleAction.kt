@@ -9,7 +9,7 @@ class ScanModuleAction : BaseScanAction() {
     override fun getFiles(e: AnActionEvent): List<File> {
         val project = e.project ?: return emptyList()
         val vf = e.getData(com.intellij.openapi.actionSystem.CommonDataKeys.VIRTUAL_FILE)
-        val module = if (vf != null) ModuleUtil.findModuleForFile(vf, project) else null
+        val module = (if (vf != null) ModuleUtil.findModuleForFile(vf, project) else null)
             ?: return FileCollector.collectProjectFiles(project)
         return FileCollector.collectModuleFiles(module)
     }
