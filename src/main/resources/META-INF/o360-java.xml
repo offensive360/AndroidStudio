@@ -1,0 +1,3 @@
+<idea-plugin>
+    <!-- Java-specific extensions loaded only when Java plugin is available -->
+</idea-plugin>
