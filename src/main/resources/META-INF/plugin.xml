@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<idea-plugin>
+    <id>com.offensive360.intellij</id>
+    <name>Offensive360 SAST for Android Studio</name>
+    <vendor email="support@offensive360.com" url="https://offensive360.com">Offensive360</vendor>
+
+    <description>
+        Offensive360 SAST for Android Studio — scan your Android and mobile application code
+        for vulnerabilities directly from the IDE.
+
+        Features:
+        - Direct source code analysis with token-based authentication
+        - Git repository scanning support
+        - Tabbed results panel with severity-coded findings
+        - Double-click navigation to vulnerable source lines
+        - Built-in fix guidance from the vulnerability knowledge base
+        - Dependency, malware, and license scanning
+        - Large codebase support (1 GB+)
+    </description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <projectConfigurable parentId="tools" id="com.offensive360.settings"
+                           displayName="Offensive360 SAST for Android Studio"
+                           instance="com.offensive360.intellij.settings.SettingsConfigurable"/>
+        <projectService serviceImplementation="com.offensive360.intellij.settings.PluginSettings"/>
+        <projectService serviceImplementation="com.offensive360.intellij.toolwindow.ScanResultsService"/>
+        <toolWindow id="Offensive360 Results"
+                    anchor="bottom"
+                    factoryClass="com.offensive360.intellij.toolwindow.ScanResultsToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <group id="Offensive360.Menu" text="Offensive360" description="Offensive360 SAST for Android Studio">
+            <action id="Offensive360.ScanProject" class="com.offensive360.intellij.actions.ScanProjectAction"
+                    text="Scan with Offensive 360" description="Scan the current project for vulnerabilities with Offensive 360 SAST"/>
+            <action id="Offensive360.ScanGitRepo" class="com.offensive360.intellij.actions.ScanGitRepoAction"
+                    text="Scan Git Repository" description="Scan a Git repository for vulnerabilities"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="BuildMenu" anchor="last"/>
+            <add-to-group group-id="MainMenu" anchor="before" relative-to-action="HelpMenu"/>
+        </group>
+    </actions>
+
+    <change-notes>
+        <![CDATA[
+            <h2>1.1.0</h2>
+            <ul>
+                <li>Branded as Offensive360 SAST for Android Studio</li>
+                <li>Added tabbed results tool window with severity-coded tables</li>
+                <li>Added vulnerability knowledge base with offline fix guidance</li>
+                <li>Added Git repository scanning</li>
+                <li>Typed scan result models (language, dependency, malware, license)</li>
+                <li>Large codebase support via temp-file-based zip</li>
+                <li>Background task scanning with cancellation support</li>
+                <li>Improved authentication error messages</li>
+                <li>Paginated result retrieval</li>
+            </ul>
+            <h2>1.0.0</h2>
+            <ul>
+                <li>Initial release</li>
+                <li>Token-based authentication with O360 server</li>
+                <li>Project and Git repository scanning</li>
+                <li>Real-time vulnerability annotations</li>
+            </ul>
+        ]]>
+    </change-notes>
+
+    <idea-version since-build="221.0" until-build="251.*"/>
+</idea-plugin>
