@@ -2,7 +2,7 @@
 <idea-plugin>
     <id>com.offensive360.intellij</id>
     <name>Offensive360 SAST for Android Studio</name>
-    <vendor email="support@offensive360.com" url="https://offensive360.com">Offensive360</vendor>
+    <vendor url="https://offensive360.com">Offensive360</vendor>
 
     <description>
         Offensive360 SAST for Android Studio — scan your Android and mobile application code
