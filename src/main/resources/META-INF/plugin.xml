@@ -1,0 +1,102 @@
+<idea-plugin>
+    <id>com.offensive360.sast</id>
+    <name>O360 SAST</name>
+    <vendor email="support@offensive360.com" url="https://offensive360.com">Offensive 360</vendor>
+    <version>1.0.0</version>
+
+    <description><![CDATA[
+        <p>Enterprise Static Application Security Testing (SAST) integrated directly into Android Studio and IntelliJ IDEA.</p>
+        <p>Scan your project, module, or file for security vulnerabilities — results appear in a dedicated findings panel with direct code navigation to every vulnerability.</p>
+        <h3>Features</h3>
+        <ul>
+            <li><b>Scan File / Module / Project</b> — from the Tools menu or right-click context menu</li>
+            <li><b>Security Findings Panel</b> — grouped by severity with file path and line numbers</li>
+            <li><b>Code Navigation</b> — click any finding to jump to the exact vulnerable line</li>
+            <li><b>Inline Annotations</b> — vulnerabilities highlighted directly in the editor</li>
+            <li><b>20+ Languages</b> — C#, Java, Kotlin, JavaScript, Python, PHP, Go, Ruby, Swift, and more</li>
+        </ul>
+        <p>Requires an O360 SAST server endpoint and API token. Configure in <b>File → Settings → Tools → O360 SAST</b>.</p>
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <b>1.0.0</b>
+        <ul><li>Initial release</li></ul>
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="o360-java.xml">com.intellij.modules.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Settings page -->
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.offensive360.sast.settings.O360Configurable"
+            id="com.offensive360.sast.settings.O360Configurable"
+            displayName="O360 SAST"/>
+
+        <!-- Persistent settings storage -->
+        <applicationService
+            serviceImplementation="com.offensive360.sast.settings.O360Settings"/>
+
+        <!-- Tool window -->
+        <toolWindow
+            id="O360 Security Findings"
+            secondary="true"
+            icon="/icons/logo.svg"
+            anchor="bottom"
+            canCloseContents="true" doNotActivateOnStart="true" factoryClass="com.offensive360.sast.toolwindow.SecurityFindingsToolWindowFactory"/>
+
+        <!-- Project-level service for findings state -->
+        <projectService
+            serviceImplementation="com.offensive360.sast.toolwindow.SecurityFindingsService"/>
+
+        <!-- Notification group -->
+        <notificationGroup
+            id="O360 SAST"
+            displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <!-- Tools menu group -->
+        <group id="O360SASTGroup" text="O360 SAST" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="O360.ScanProject"
+                    class="com.offensive360.sast.actions.ScanProjectAction"
+                    text="Scan Project"
+                    description="Scan the entire project for security vulnerabilities"
+                    icon="/icons/logo.svg"/>
+            <action id="O360.ScanModule"
+                    class="com.offensive360.sast.actions.ScanModuleAction"
+                    text="Scan Module"
+                    description="Scan the current module for security vulnerabilities"/>
+            <action id="O360.ScanFile"
+                    class="com.offensive360.sast.actions.ScanFileAction"
+                    text="Scan File"
+                    description="Scan the current file for security vulnerabilities"/>
+            <separator/>
+            <action id="O360.ClearFindings"
+                    class="com.offensive360.sast.actions.ClearFindingsAction"
+                    text="Clear Findings"
+                    description="Clear all security findings"/>
+        </group>
+
+        <!-- Editor context menu -->
+        <group id="O360SASTEditorGroup">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <action id="O360.ScanFileFromEditor"
+                    class="com.offensive360.sast.actions.ScanFileAction"
+                    text="O360 SAST: Scan File"/>
+        </group>
+
+        <!-- Project view context menu -->
+        <group id="O360SASTProjectGroup">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+            <action id="O360.ScanFileFromProject"
+                    class="com.offensive360.sast.actions.ScanFileAction"
+                    text="O360 SAST: Scan File"/>
+            <action id="O360.ScanModuleFromProject"
+                    class="com.offensive360.sast.actions.ScanModuleAction"
+                    text="O360 SAST: Scan Module"/>
+        </group>
+    </actions>
+</idea-plugin>
