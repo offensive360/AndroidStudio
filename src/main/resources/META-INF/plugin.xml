@@ -19,6 +19,8 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <b>1.1.17</b>
+        <ul><li>Update checker now runs on IDE start, so new versions are surfaced even before you trigger a scan.</li></ul>
         <b>1.1.16</b>
         <ul><li>Fixed: clicking a finding in a sorted results table now navigates to the correct file and line.</li></ul>
     ]]></change-notes>
@@ -49,6 +51,10 @@
         <!-- Project-level service for findings state -->
         <projectService
             serviceImplementation="com.offensive360.sast.toolwindow.SecurityFindingsService"/>
+
+        <!-- Background update check on IDE start (independent of marketplace) -->
+        <postStartupActivity
+            implementation="com.offensive360.sast.update.PluginUpdateStartupActivity"/>
 
         <!-- Notification group -->
         <notificationGroup
