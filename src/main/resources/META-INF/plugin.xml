@@ -19,6 +19,8 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <b>1.1.19</b>
+        <ul><li>Findings panel now shows exactly what the server returned, byte-for-byte aligned with the dashboard view. No client-side line rewriting or hiding.</li></ul>
         <b>1.1.18</b>
         <ul><li>Findings whose source line drifts from the actual code are now re-located against your local file, so navigation lands on the correct line. Findings that cannot be located in your sources are hidden to avoid misleading you.</li></ul>
         <b>1.1.17</b>

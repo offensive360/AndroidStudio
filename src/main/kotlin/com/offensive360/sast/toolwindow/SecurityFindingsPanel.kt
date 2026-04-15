@@ -410,38 +410,27 @@ class SecurityFindingsPanel(private val project: Project) {
 
     fun showFindings(findings: List<Finding>) {
         ApplicationManager.getApplication().invokeLater {
-            // Wipe first so stale rows from a previous scan can never leak through.
+            // RECONCILIATION CONTRACT: the tool window shows EXACTLY what the
+            // server returned — no filtering, no dedup, no client-side rewrite.
+            // UI count == server count == dashboard count, always.
             tableModel.setFindings(emptyList())
             currentFindings = emptyList()
 
-            // Auto-correct line numbers against the local file content. The scanner
-            // can return findings whose lineNumber drifts from the snippet location;
-            // re-locate the snippet in the local file and rewrite the line. If a
-            // finding's snippet cannot be located in any local file at all, drop it
-            // — we cannot navigate to it accurately and would mislead the user.
-            val correction = FindingLineCorrector.apply(findings, project) { f -> findVirtualFile(f) }
-            val displayed = correction.findings
+            currentFindings = findings
+            tableModel.setFindings(findings)
 
-            currentFindings = displayed
-            tableModel.setFindings(displayed)
+            val critical = findings.count { it.severity == Severity.CRITICAL }
+            val high = findings.count { it.severity == Severity.HIGH }
+            val medium = findings.count { it.severity == Severity.MEDIUM }
+            val low = findings.count { it.severity == Severity.LOW }
 
-            val critical = displayed.count { it.severity == Severity.CRITICAL }
-            val high = displayed.count { it.severity == Severity.HIGH }
-            val medium = displayed.count { it.severity == Severity.MEDIUM }
-            val low = displayed.count { it.severity == Severity.LOW }
-
-            val base = if (displayed.isEmpty()) {
+            statusLabel.text = if (findings.isEmpty()) {
                 "No findings"
             } else {
-                "${displayed.size} findings \u2014 Critical: $critical  High: $high  Medium: $medium  Low: $low"
+                "${findings.size} findings \u2014 Critical: $critical  High: $high  Medium: $medium  Low: $low"
             }
-            val suffix = buildString {
-                if (correction.corrected > 0) append("  (${correction.corrected} re-located)")
-                if (correction.dropped > 0) append("  (${correction.dropped} hidden \u2014 source mismatch)")
-            }
-            statusLabel.text = base + suffix
 
-            if (displayed.isNotEmpty()) table.setRowSelectionInterval(0, 0)
+            if (findings.isNotEmpty()) table.setRowSelectionInterval(0, 0)
         }
     }
 
