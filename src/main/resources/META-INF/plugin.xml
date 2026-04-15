@@ -19,6 +19,8 @@
     ]]></description>
 
     <change-notes><![CDATA[
+        <b>1.1.18</b>
+        <ul><li>Findings whose source line drifts from the actual code are now re-located against your local file, so navigation lands on the correct line. Findings that cannot be located in your sources are hidden to avoid misleading you.</li></ul>
         <b>1.1.17</b>
         <ul><li>Update checker now runs on IDE start, so new versions are surfaced even before you trigger a scan.</li></ul>
         <b>1.1.16</b>

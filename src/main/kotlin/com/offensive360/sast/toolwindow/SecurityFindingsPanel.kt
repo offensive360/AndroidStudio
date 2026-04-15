@@ -410,37 +410,38 @@ class SecurityFindingsPanel(private val project: Project) {
 
     fun showFindings(findings: List<Finding>) {
         ApplicationManager.getApplication().invokeLater {
-            // RECONCILIATION CONTRACT (2026-04-08):
-            //   The tool window shows EXACTLY what the server returned — no filtering,
-            //   no dedup, no client-side drops. UI count == server count, always.
-            //   The post-render assertion below logs a warning if drift ever occurs.
-            //
             // Wipe first so stale rows from a previous scan can never leak through.
             tableModel.setFindings(emptyList())
             currentFindings = emptyList()
 
-            // Replace the entire list with the server response as-is. No filter.
-            currentFindings = findings
-            tableModel.setFindings(findings)
+            // Auto-correct line numbers against the local file content. The scanner
+            // can return findings whose lineNumber drifts from the snippet location;
+            // re-locate the snippet in the local file and rewrite the line. If a
+            // finding's snippet cannot be located in any local file at all, drop it
+            // — we cannot navigate to it accurately and would mislead the user.
+            val correction = FindingLineCorrector.apply(findings, project) { f -> findVirtualFile(f) }
+            val displayed = correction.findings
 
-            val critical = findings.count { it.severity == Severity.CRITICAL }
-            val high = findings.count { it.severity == Severity.HIGH }
-            val medium = findings.count { it.severity == Severity.MEDIUM }
-            val low = findings.count { it.severity == Severity.LOW }
+            currentFindings = displayed
+            tableModel.setFindings(displayed)
 
-            // Reconciliation assertion: the UI table must now contain exactly findings.size rows.
-            val uiCount = tableModel.rowCount
-            if (uiCount != findings.size) {
-                statusLabel.text = "WARN: count drift - server=${findings.size}, ui=$uiCount"
+            val critical = displayed.count { it.severity == Severity.CRITICAL }
+            val high = displayed.count { it.severity == Severity.HIGH }
+            val medium = displayed.count { it.severity == Severity.MEDIUM }
+            val low = displayed.count { it.severity == Severity.LOW }
+
+            val base = if (displayed.isEmpty()) {
+                "No findings"
             } else {
-                statusLabel.text = if (findings.isEmpty()) {
-                    "No findings"
-                } else {
-                    "${findings.size} findings \u2014 Critical: $critical  High: $high  Medium: $medium  Low: $low"
-                }
+                "${displayed.size} findings \u2014 Critical: $critical  High: $high  Medium: $medium  Low: $low"
             }
+            val suffix = buildString {
+                if (correction.corrected > 0) append("  (${correction.corrected} re-located)")
+                if (correction.dropped > 0) append("  (${correction.dropped} hidden \u2014 source mismatch)")
+            }
+            statusLabel.text = base + suffix
 
-            if (findings.isNotEmpty()) table.setRowSelectionInterval(0, 0)
+            if (displayed.isNotEmpty()) table.setRowSelectionInterval(0, 0)
         }
     }
 
@@ -744,16 +745,11 @@ class SecurityFindingsPanel(private val project: Project) {
                 )
                 return@invokeLater
             }
-            val fileEditorManager = FileEditorManager.getInstance(project)
-            fileEditorManager.openFile(vf, true)
-            val editor = fileEditorManager.selectedTextEditor ?: return@invokeLater
+            // OpenFileDescriptor opens the file AND positions the caret atomically,
+            // so we can't accidentally land on a stale already-open editor.
             val line = (finding.line - 1).coerceAtLeast(0)
-            val doc = editor.document
-            if (line < doc.lineCount) {
-                val offset = doc.getLineStartOffset(line)
-                editor.caretModel.moveToOffset(offset)
-                editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.CENTER)
-            }
+            com.intellij.openapi.fileEditor.OpenFileDescriptor(project, vf, line, 0)
+                .navigate(true)
         }
     }
 

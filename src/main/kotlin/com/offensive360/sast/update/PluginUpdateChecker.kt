@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Fire-and-forget, throttled (24h cache), silent on any failure.
  */
 object PluginUpdateChecker {
-    private const val CURRENT_VERSION = "1.1.17"
+    private const val CURRENT_VERSION = "1.1.18"
     private const val RELEASES_API_URL = "https://api.github.com/repos/offensive360/AndroidStudio/releases/latest"
     private const val USER_AGENT = "Offensive360-AS-Plugin/$CURRENT_VERSION"
     private const val CACHE_TTL_MS = 24L * 60 * 60 * 1000

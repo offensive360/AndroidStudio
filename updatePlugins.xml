@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <plugins>
   <plugin id="com.offensive360.sast"
-          url="https://github.com/offensive360/AndroidStudio/releases/download/v1.1.17/o360-sast-1.1.17.zip"
-          version="1.1.17">
+          url="https://github.com/offensive360/AndroidStudio/releases/download/v1.1.18/o360-sast-1.1.18.zip"
+          version="1.1.18">
     <name>O360 SAST</name>
     <vendor email="support@offensive360.com" url="https://offensive360.com">Offensive 360</vendor>
     <description>Enterprise Static Application Security Testing for Android Studio and IntelliJ IDEA.</description>
-    <change-notes>Update checker now runs on IDE start; navigation from sorted findings table fixed.</change-notes>
+    <change-notes>Findings re-located against local source so navigation lands on the correct line; mismatched findings hidden to avoid misleading.</change-notes>
     <idea-version since-build="211" until-build="299.*"/>
   </plugin>
 </plugins>
