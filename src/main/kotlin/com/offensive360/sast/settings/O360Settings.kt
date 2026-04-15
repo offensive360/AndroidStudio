@@ -11,7 +11,7 @@ class O360Settings : PersistentStateComponent<O360Settings.State> {
     data class State(
         var endpoint: String = "",
         var accessToken: String = "",
-        var allowSelfSignedCerts: Boolean = false
+        var allowSelfSignedCerts: Boolean = false,
     )
 
     private var state = State()
@@ -33,6 +33,8 @@ class O360Settings : PersistentStateComponent<O360Settings.State> {
     var allowSelfSignedCerts: Boolean
         get() = state.allowSelfSignedCerts
         set(value) { state.allowSelfSignedCerts = value }
+
+
 
     val isConfigured: Boolean
         get() = endpoint.isNotBlank() && accessToken.isNotBlank()

@@ -19,8 +19,8 @@
     ]]></description>
 
     <change-notes><![CDATA[
-        <b>1.0.0</b>
-        <ul><li>Initial release</li></ul>
+        <b>1.1.16</b>
+        <ul><li>Fixed: clicking a finding in a sorted results table now navigates to the correct file and line.</li></ul>
     ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
@@ -78,6 +78,11 @@
                     class="com.offensive360.sast.actions.ClearFindingsAction"
                     text="Clear Findings"
                     description="Clear all security findings"/>
+            <separator/>
+            <action id="O360.CheckUpdate"
+                    class="com.offensive360.sast.actions.CheckUpdateAction"
+                    text="Check for Updates"
+                    description="Check for Offensive 360 plugin updates"/>
         </group>
 
         <!-- Editor context menu -->

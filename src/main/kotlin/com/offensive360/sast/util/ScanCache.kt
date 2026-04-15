@@ -11,6 +11,39 @@ object ScanCache {
 
     private const val CACHE_DIR = ".SASTO360"
     private const val CACHE_FILE = "lastScanResults.json"
+    // Schema version is now derived from the plugin descriptor version. Every new
+    // plugin install/upgrade automatically invalidates any prior cache for the project,
+    // while user settings (token, URL, ignore lists — stored in o360sast.xml) remain
+    // untouched. Customers no longer need to manually clear cache after upgrading.
+    private val CACHE_SCHEMA_VERSION: String by lazy {
+        try {
+            val pid = com.intellij.openapi.extensions.PluginId.getId("com.offensive360.sast")
+            val v = com.intellij.ide.plugins.PluginManagerCore.getPlugin(pid)?.version ?: "unknown"
+            "plugin-$v"
+        } catch (_: Throwable) {
+            "plugin-unknown"
+        }
+    }
+    private const val SCHEMA_MARKER_FILE = "schema.version"
+
+    /**
+     * Wipes any cache from a prior plugin version on first load after upgrade.
+     * Idempotent: writes a schema-version marker so this only runs once per upgrade.
+     */
+    private fun ensureFreshSchema(projectBasePath: String) {
+        try {
+            val cacheDir = File(projectBasePath, CACHE_DIR)
+            if (!cacheDir.exists()) return
+            val markerFile = File(cacheDir, SCHEMA_MARKER_FILE)
+            val existing = if (markerFile.exists()) markerFile.readText().trim() else ""
+            if (existing == CACHE_SCHEMA_VERSION) return
+            // Schema mismatch (or first run after upgrade) — delete stale cache
+            File(cacheDir, CACHE_FILE).takeIf { it.exists() }?.delete()
+            markerFile.writeText(CACHE_SCHEMA_VERSION)
+        } catch (_: Exception) {
+            // best-effort cleanup
+        }
+    }
 
     /**
      * Compute MD5 hash of a file's contents.
@@ -46,8 +79,10 @@ object ScanCache {
 
     /**
      * Save scan results and file hashes to cache file.
+     * serverTotal is the server-reported totalVulnerabilities count (persisted so we
+     * can detect cache tampering / drift on load).
      */
-    fun save(projectBasePath: String, findings: List<Finding>, fileHashes: Map<String, String>) {
+    fun save(projectBasePath: String, findings: List<Finding>, fileHashes: Map<String, String>, serverTotal: Int? = null) {
         val cacheDir = File(projectBasePath, CACHE_DIR)
         if (!cacheDir.exists()) {
             cacheDir.mkdirs()
@@ -55,6 +90,7 @@ object ScanCache {
 
         val json = JSONObject()
         json.put("timestamp", System.currentTimeMillis())
+        json.put("totalVulnerabilities", serverTotal ?: findings.size)
 
         val hashesObj = JSONObject()
         for ((path, hash) in fileHashes) {
@@ -84,15 +120,18 @@ object ScanCache {
     }
 
     /**
-     * Load cached scan results. Returns null if cache does not exist or is unreadable.
+     * Load cached scan results. Returns null if cache does not exist, is unreadable,
+     * or fails the integrity check (stored totalVulnerabilities != findings array length).
      */
     fun load(projectBasePath: String): CachedScanData? {
+        ensureFreshSchema(projectBasePath)
         val cacheFile = File(projectBasePath, "$CACHE_DIR/$CACHE_FILE")
         if (!cacheFile.exists()) return null
 
         return try {
             val json = JSONObject(cacheFile.readText())
             val timestamp = json.optLong("timestamp", 0L)
+            val storedTotal = if (json.has("totalVulnerabilities")) json.optInt("totalVulnerabilities", -1) else -1
 
             val hashesObj = json.optJSONObject("fileHashes") ?: JSONObject()
             val fileHashes = mutableMapOf<String, String>()
@@ -117,6 +156,13 @@ object ScanCache {
                     effect = fObj.optString("effect").takeIf { it.isNotBlank() },
                     recommendation = fObj.optString("recommendation").takeIf { it.isNotBlank() }
                 ))
+            }
+
+            // Integrity check: if we have a server-reported total, it MUST match the
+            // cached array length. Any drift = stale/corrupted cache → discard.
+            if (storedTotal >= 0 && storedTotal != findings.size) {
+                try { cacheFile.delete() } catch (_: Exception) {}
+                return null
             }
 
             CachedScanData(timestamp, fileHashes, findings)

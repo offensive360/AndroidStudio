@@ -13,6 +13,7 @@ import com.intellij.openapi.wm.ToolWindowManager
 import com.offensive360.sast.api.O360ApiClient
 import com.offensive360.sast.settings.O360Settings
 import com.offensive360.sast.toolwindow.SecurityFindingsService
+import com.offensive360.sast.update.PluginUpdateChecker
 import com.offensive360.sast.util.ScanCache
 import java.io.File
 import java.net.SocketTimeoutException
@@ -48,6 +49,9 @@ abstract class BaseScanAction : AnAction() {
             notify(project, "O360 SAST: A scan is already in progress for this project. Please wait for it to finish.", NotificationType.WARNING)
             return
         }
+
+        // Option D — fire-and-forget plugin-update check (silent if server lacks endpoint)
+        try { PluginUpdateChecker.checkAsync(project) } catch (_: Exception) {}
 
         val files = getFiles(e)
         if (files.isEmpty()) {
@@ -103,7 +107,7 @@ abstract class BaseScanAction : AnAction() {
                     // Save results to cache
                     if (projectBasePath != null) {
                         try {
-                            ScanCache.save(projectBasePath, result.findings, currentHashes)
+                            ScanCache.save(projectBasePath, result.findings, currentHashes, result.findings.size)
                         } catch (_: Exception) {
                             // Cache save failure is non-fatal
                         }

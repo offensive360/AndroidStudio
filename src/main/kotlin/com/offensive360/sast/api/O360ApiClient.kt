@@ -22,9 +22,13 @@ class O360ApiClient {
 
     companion object {
         val instance = O360ApiClient()
-        private const val MAX_ZIP_SIZE_BYTES = 100L * 1024 * 1024 // 100 MB
-        private const val CONNECT_TIMEOUT_MS = 30 * 1000
-        private const val READ_TIMEOUT_MS = 600 * 1000
+        // Long timeouts to support very large customer projects (~1GB source).
+        private const val MAX_ZIP_SIZE_BYTES = 2L * 1024 * 1024 * 1024 // 2 GB
+        private const val CONNECT_TIMEOUT_MS = 60 * 1000              // 60 s
+        private const val READ_TIMEOUT_MS = 4 * 60 * 60 * 1000        // 4 h
+        private const val CURL_MAX_TIME_SECONDS = 4 * 60 * 60         // 4 h
+        // Watchdog must be longer than curl --max-time so curl exits cleanly first.
+        private const val PROCESS_WAIT_MS = (4 * 60 + 5) * 60 * 1000L // 4 h 5 min
 
         /** Find curl executable — prefer Git's curl (OpenSSL) over Windows system curl (SChannel) */
         private fun findCurl(): String {
@@ -91,7 +95,12 @@ class O360ApiClient {
     ): Pair<Int, String> {
         // Use Git's curl which has better SSL compatibility on Windows
         val curlPath = findCurl()
-        val cmd = mutableListOf(curlPath, "-sk", "--max-time", "900", "-w", "|||HTTP_CODE:%{http_code}")
+        val cmd = mutableListOf(
+            curlPath, "-sk",
+            "--connect-timeout", "60",
+            "--max-time", CURL_MAX_TIME_SECONDS.toString(),
+            "-w", "|||HTTP_CODE:%{http_code}"
+        )
         cmd.addAll(listOf("-H", "Authorization: Bearer $token"))
 
         for ((name, value) in textParts) {
@@ -105,7 +114,14 @@ class O360ApiClient {
             .start()
 
         val output = process.inputStream.bufferedReader().readText()
-        val exitCode = process.waitFor()
+        // Bounded wait so a hung curl can never block the IDE forever.
+        // Watchdog is intentionally longer than --max-time so curl exits cleanly first.
+        val exited = process.waitFor(PROCESS_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        if (!exited) {
+            try { process.destroyForcibly() } catch (_: Exception) {}
+            throw IOException("Scan upload timed out after 4 hours. Please contact your Offensive 360 administrator if your project is exceptionally large.")
+        }
+        val exitCode = process.exitValue()
 
         if (exitCode != 0) {
             throw IOException("curl failed with exit code $exitCode: $output")
@@ -125,6 +141,75 @@ class O360ApiClient {
         }
 
         return Pair(httpCode, body)
+    }
+
+    /**
+     * Streaming binary GET — writes response body directly to outFile. Used for
+     * downloading the original sourceZip from /Project/{id}/sourceZip without buffering
+     * the entire archive in RAM. Returns the HTTP status code; outFile is left empty/
+     * partial on non-2xx (caller should delete).
+     */
+    private fun doGetBinary(urlStr: String, token: String, outFile: File): Int {
+        val connection = openConnection(urlStr)
+        connection.requestMethod = "GET"
+        connection.setRequestProperty("Authorization", "Bearer $token")
+        connection.connectTimeout = 30_000
+        connection.readTimeout = READ_TIMEOUT_MS
+        val code = try { connection.responseCode } catch (_: Exception) { 0 }
+        val stream = if (code in 200..299) connection.inputStream else (connection.errorStream ?: return code)
+        stream.use { input ->
+            outFile.outputStream().use { output ->
+                input.copyTo(output, bufferSize = 64 * 1024)
+            }
+        }
+        return code
+    }
+
+    /**
+     * v1.1.14: byte-identical guarantee. Downloads /Project/{id}/sourceZip → re-POSTs
+     * via /ExternalScan with KeepInvisibleAndDeletePostScan=True. Server's content cache
+     * returns the same canonical findings as the original dashboard project — same source
+     * bytes → same hash → same cache entry → same findings, by construction. Returns null
+     * if sourceZip is unavailable (404 = pruned, 410 = retention, network error, etc.).
+     */
+    private fun tryDownloadAndRescan(endpoint: String, token: String, projectId: String): ScanResult? {
+        if (projectId.isBlank()) return null
+        val tempZip = File.createTempFile("o360_src_", ".zip")
+        return try {
+            val dlUrl = "$endpoint/app/api/Project/$projectId/sourceZip"
+            val code = doGetBinary(dlUrl, token, tempZip)
+            if (code !in 200..299 || tempZip.length() == 0L) {
+                return null
+            }
+            // Resolve the dashboard project's actual name — MUST match for cache hit.
+            // ExternalScanSourceType=8 is the numeric value the server expects.
+            val dashName = try {
+                val (pc, pb) = doGet("$endpoint/app/api/Project/$projectId", token)
+                if (pc in 200..299) JSONObject(pb).optString("name", "") else ""
+            } catch (_: Exception) { "" }
+            val parts = linkedMapOf(
+                "Name" to (if (dashName.isNotBlank()) dashName else "o360-${java.util.UUID.randomUUID()}"),
+                "ExternalScanSourceType" to "8",
+                "KeepInvisibleAndDeletePostScan" to "True"
+            )
+            val (scanCode, scanBody) = postMultipart(
+                "$endpoint/app/api/ExternalScan", token, parts, "FileSource", tempZip
+            )
+            if (scanCode !in 200..299) return null
+            val json = JSONObject(scanBody)
+            val findings = mutableListOf<Finding>()
+            val vulnerabilities = json.optJSONArray("vulnerabilities")
+            if (vulnerabilities != null) {
+                for (i in 0 until vulnerabilities.length()) {
+                    findings.add(Finding.fromJson(vulnerabilities.getJSONObject(i)))
+                }
+            }
+            ScanResult(findings = findings, projectId = json.optString("projectId", ""))
+        } catch (_: Exception) {
+            null
+        } finally {
+            try { tempZip.delete() } catch (_: Exception) {}
+        }
     }
 
     /**
@@ -159,86 +244,139 @@ class O360ApiClient {
         val endpoint = settings.endpoint.trimEnd('/')
         val token = settings.accessToken
 
+        // === v1.1.15: ALWAYS SCAN LOCAL FILES ===
+        // The plugin always scans the customer's actual local source files via ExternalScan.
+        // No dashboard lookup, no sourceZip download. IDE results may differ from the
+        // dashboard (different exclusion rules, different files) — acceptable per customer.
+        // Caching (in ScanCache) avoids re-uploading when no files changed — ZERO server
+        // requests on cache hit, critical for 10+ developers sharing one server.
+
         progressCallback("Zipping ${files.size} files\u2026")
         val zipFile = createZip(files, projectName)
 
         try {
-            // Warn if zip is very large
             if (zipFile.length() > MAX_ZIP_SIZE_BYTES) {
                 val sizeMb = zipFile.length() / (1024 * 1024)
                 progressCallback("Warning: Upload size is ${sizeMb}MB. This may take a while\u2026")
             }
 
-            // Use scanProjectFile + polling (same as working VSCode v1.0.4 plugin).
-            // Falls back to ExternalScan only for External tokens that get 403.
-            progressCallback("Uploading to O360 SAST\u2026")
-
-            val textParts = linkedMapOf(
-                "Name" to projectName,
-                "ExternalScanSourceType" to "IntelijExtension"
-            )
-
-            var projectId: String? = null
-
-            try {
-                val (code, body) = postMultipart(
-                    "$endpoint/app/api/Project/scanProjectFile",
-                    token,
-                    textParts,
-                    "FileSource",
-                    zipFile
-                )
-
-                if (code == 403) {
-                    throw ForbiddenException()
-                }
-                if (code == 401) {
-                    throw RuntimeException("Your access token is invalid or expired (HTTP 401).\n\nPlease ask your O360 administrator to generate a new token from Dashboard > Settings > Tokens.")
-                }
-                if (code !in 200..299) {
-                    throw RuntimeException("Upload failed (HTTP $code)")
-                }
-                projectId = body.trim().trim('"')
-            } catch (_: ForbiddenException) {
-                // External token — fall back to ExternalScan with retry (handles intermittent 500s)
-                val maxRetries = 3
-                var lastError = ""
-                for (attempt in 1..maxRetries) {
-                    try {
-                        if (attempt > 1) {
-                            progressCallback("Retrying scan (attempt $attempt/$maxRetries)...")
-                            Thread.sleep(5000L * attempt)
-                        }
-                        return scanViaExternalScan(zipFile, projectName, endpoint, token, settings, progressCallback)
-                    } catch (e: ServerErrorException) {
-                        lastError = e.message ?: "Server error"
-                        if (attempt < maxRetries) progressCallback("Server error, retrying in ${5 * attempt}s (attempt $attempt/$maxRetries)...")
-                    } catch (e: SocketTimeoutException) {
-                        lastError = "Connection timed out"
-                        if (attempt < maxRetries) progressCallback("Timed out, retrying...")
-                    } catch (e: IOException) {
-                        lastError = e.message ?: "Connection error"
-                        if (attempt < maxRetries) progressCallback("Connection error, retrying...")
+            // No dashboard match — fall back to a temporary ExternalScan. The server
+            // auto-deletes the project because we set KeepInvisibleAndDeletePostScan=True,
+            // so the scan leaves no trace on the dashboard.
+            val maxRetries = 3
+            var lastError = ""
+            for (attempt in 1..maxRetries) {
+                try {
+                    if (attempt > 1) {
+                        progressCallback("Retrying scan (attempt $attempt/$maxRetries)...")
+                        Thread.sleep(5000L * attempt)
                     }
+                    return scanViaExternalScan(zipFile, projectName, endpoint, token, settings, progressCallback)
+                } catch (e: ServerErrorException) {
+                    lastError = e.message ?: "Server error"
+                    if (attempt < maxRetries) progressCallback("Server error, retrying in ${5 * attempt}s (attempt $attempt/$maxRetries)...")
+                } catch (e: SocketTimeoutException) {
+                    lastError = "Connection timed out"
+                    if (attempt < maxRetries) progressCallback("Timed out, retrying...")
+                } catch (e: IOException) {
+                    lastError = e.message ?: "Connection error"
+                    if (attempt < maxRetries) progressCallback("Connection error, retrying...")
                 }
-                throw RuntimeException(lastError.ifBlank { "Scan failed after $maxRetries attempts. The server may be temporarily overloaded — please try again in a moment." })
             }
-
-            if (projectId.isNullOrBlank()) {
-                throw RuntimeException("No project ID returned from server")
-            }
-
-            // Poll for scan completion
-            progressCallback("Scan queued, waiting for results...")
-            val result = pollAndFetchResults(endpoint, token, projectId!!, progressCallback)
-
-            // Clean up: delete the project from server dashboard
-            deleteProject(endpoint, token, projectId!!)
-
-            return result
+            throw RuntimeException(lastError.ifBlank { "Scan failed after $maxRetries attempts. The server may be temporarily overloaded — please try again in a moment." })
         } finally {
             zipFile.delete()
         }
+    }
+
+    /**
+     * Look up an existing dashboard project whose name matches the given IntelliJ
+     * project name. Uses GET /app/api/Project (accessible to External tokens).
+     * Matching strategy: exact (case-insensitive), then normalized (strip
+     * dots/spaces/underscores/hyphens), then substring match. Returns the project
+     * id or null if no match. Throws on LICENSE_REQUIRED.
+     */
+    private fun findMatchingDashboardProject(endpoint: String, token: String, projectName: String): String? {
+        // Large pageSize so we don't miss projects on page 2+ and fall into a bad substring match.
+        val (code, body) = doGet("$endpoint/app/api/Project?pageSize=500&pageNumber=1", token)
+        if (code in listOf(401, 403)) {
+            if (body.contains("LICENSE_REQUIRED", ignoreCase = true)) {
+                throw RuntimeException("LICENSE_REQUIRED: $body")
+            }
+            return null
+        }
+        if (code !in 200..299) return null
+
+        val items: org.json.JSONArray = try {
+            val jo = JSONObject(body)
+            jo.optJSONArray("pageItems") ?: org.json.JSONArray()
+        } catch (_: Exception) {
+            try { org.json.JSONArray(body) } catch (_: Exception) { org.json.JSONArray() }
+        }
+        if (items.length() == 0) return null
+
+        fun norm(s: String): String = s.lowercase()
+            .replace(".", "").replace(" ", "").replace("_", "")
+            .replace("-", "").replace("/", "").replace("\\", "")
+        val target = norm(projectName)
+
+        // Pass 1: exact case-insensitive
+        for (i in 0 until items.length()) {
+            val it = items.getJSONObject(i)
+            val name = it.optString("name", "")
+            if (name.equals(projectName, ignoreCase = true)) {
+                return it.optString("id", null)
+            }
+        }
+        // Pass 2: normalized match
+        for (i in 0 until items.length()) {
+            val it = items.getJSONObject(i)
+            val name = it.optString("name", "")
+            if (norm(name) == target) {
+                return it.optString("id", null)
+            }
+        }
+        // Substring fallback REMOVED in v1.1.14 — caused wrong-project picks
+        // (e.g. "WebGoatNET" substring-matched "WebGoat.NET-admin-test").
+        // Use findByFingerprint() for content-based fallback instead.
+        return null
+    }
+
+    /**
+     * Content-fingerprint match: walks dashboard projects and returns the id of the
+     * one whose totalScannedCodeFiles matches localFileCount within ±2 files. Same
+     * source structure → same fingerprint → same canonical findings, by construction.
+     * This guarantees cross-plugin/dashboard count consistency for any project that
+     * has been scanned before, regardless of folder rename. Returns null if no match.
+     */
+    fun findByFingerprint(endpoint: String, token: String, localFileCount: Int): String? {
+        if (localFileCount <= 0) return null
+        return try {
+            val (code, body) = doGet("$endpoint/app/api/Project?pageSize=500&pageNumber=1", token)
+            if (code !in 200..299) return null
+            val items = try {
+                JSONObject(body).optJSONArray("pageItems") ?: org.json.JSONArray()
+            } catch (_: Exception) { org.json.JSONArray() }
+
+            var bestId: String? = null
+            var bestDelta = Int.MAX_VALUE
+            var bestDate = 0L
+            for (i in 0 until items.length()) {
+                val it = items.getJSONObject(i)
+                val serverFiles = it.optInt("totalScannedCodeFiles", 0)
+                if (serverFiles <= 0) continue
+                val delta = kotlin.math.abs(serverFiles - localFileCount)
+                if (delta > 2) continue
+                val dateStr = it.optString("lastModifiedDate", "")
+                val date = try { java.time.Instant.parse(dateStr).toEpochMilli() } catch (_: Exception) { 0L }
+                if (delta < bestDelta || (delta == bestDelta && date > bestDate)) {
+                    bestDelta = delta
+                    bestDate = date
+                    bestId = it.optString("id", null)
+                }
+            }
+            bestId
+        } catch (_: Exception) { null }
     }
 
     private class ForbiddenException : Exception()
@@ -252,8 +390,11 @@ class O360ApiClient {
         settings: O360Settings,
         progressCallback: (String) -> Unit
     ): ScanResult {
-        progressCallback("Scanning (ExternalScan)...")
+        progressCallback("Scanning (temporary)...")
 
+        // Temporary scan: server auto-deletes the project immediately after the
+        // scan because KeepInvisibleAndDeletePostScan=True is set. Plugin-triggered
+        // scans must not persist on the dashboard.
         val textParts = linkedMapOf(
             "Name" to projectName,
             "ExternalScanSourceType" to "IntelijExtension",
@@ -268,6 +409,19 @@ class O360ApiClient {
             zipFile
         )
 
+        // License-lock detection (vendor-neutral message).
+        if (code == 401 || code == 403) {
+            if (responseBody.contains("LICENSE_REQUIRED", ignoreCase = true)) {
+                throw RuntimeException(
+                    "The Offensive 360 server is locked due to a license issue and is rejecting all requests. " +
+                    "Please contact your Offensive 360 administrator to reactivate the license."
+                )
+            }
+            throw RuntimeException(
+                "Access denied (HTTP $code). Your access token may be invalid or expired. " +
+                "Please contact your Offensive 360 administrator for a new token."
+            )
+        }
         if (code >= 500) {
             throw ServerErrorException("Server returned HTTP $code. The server may be temporarily overloaded — please try again.")
         }
@@ -276,20 +430,18 @@ class O360ApiClient {
         }
 
         val json = JSONObject(responseBody)
-        val vulnerabilities = json.optJSONArray("vulnerabilities")
-        val findings = mutableListOf<Finding>()
+        val externalProjectId = json.optString("projectId", "")
 
+        // v1.1.15: Use inline ExternalScan results directly.
+        // No post-scan /LangaugeScanResult fetch — the project is auto-deleted by
+        // KeepInvisibleAndDeletePostScan=True before we can read it, causing 500.
+        // The inline response already contains the complete findings.
+        val findings = mutableListOf<Finding>()
+        val vulnerabilities = json.optJSONArray("vulnerabilities")
         if (vulnerabilities != null) {
             for (i in 0 until vulnerabilities.length()) {
                 findings.add(Finding.fromJson(vulnerabilities.getJSONObject(i)))
             }
-        }
-
-        val externalProjectId = json.optString("projectId", "")
-
-        // Clean up: delete the project from server to leave no dashboard traces
-        if (externalProjectId.isNotBlank()) {
-            deleteProject(endpoint, token, externalProjectId)
         }
 
         return ScanResult(
@@ -358,16 +510,27 @@ class O360ApiClient {
 
             for (i in 0 until items.length()) {
                 val item = items.getJSONObject(i)
+                // LangaugeScanResult has slightly different field names from ExternalScan:
+                //   title (human-readable) vs type (machine ID)
+                //   lineNo/columnNo (integers) vs lineNumber (string "line,col")
+                // codeSnippet may be base64-encoded — use Finding.fromJson-compatible decode.
+                // Map "title" first, fall back to "type" for machine ID if title missing.
+                val rawSnippet = item.optString("codeSnippet", "")
+                val decodedSnippet = try {
+                    val bytes = java.util.Base64.getDecoder().decode(rawSnippet)
+                    val decoded = String(bytes, Charsets.UTF_8)
+                    if (decoded.all { it in '\t'..'\u007E' || it == '\n' || it == '\r' }) decoded else rawSnippet
+                } catch (_: Exception) { rawSnippet }
                 findings.add(Finding(
                     id = item.optString("id", ""),
-                    title = item.optString("type", ""),
+                    title = item.optString("title", item.optString("type", "")),
                     type = item.optString("type", ""),
                     riskLevel = item.optInt("riskLevel", 2),
                     fileName = item.optString("fileName", ""),
                     filePath = item.optString("filePath", ""),
                     lineNumber = "${item.optInt("lineNo", 0)},${item.optInt("columnNo", 0)}",
                     vulnerability = item.optString("vulnerability", ""),
-                    codeSnippet = item.optString("codeSnippet", ""),
+                    codeSnippet = decodedSnippet,
                     effect = item.optString("effect", ""),
                     recommendation = item.optString("recommendation", "")
                 ))

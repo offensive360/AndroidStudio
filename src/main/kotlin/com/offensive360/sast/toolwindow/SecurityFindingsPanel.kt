@@ -94,18 +94,24 @@ class SecurityFindingsPanel(private val project: Project) {
         table.selectionModel.selectionMode = ListSelectionModel.SINGLE_SELECTION
 
         table.selectionModel.addListSelectionListener {
-            val row = table.selectedRow
-            if (row >= 0 && row < currentFindings.size) {
-                showDetail(tableModel.getFinding(row))
+            val viewRow = table.selectedRow
+            if (viewRow >= 0) {
+                val modelRow = table.convertRowIndexToModel(viewRow)
+                if (modelRow >= 0 && modelRow < currentFindings.size) {
+                    showDetail(tableModel.getFinding(modelRow))
+                }
             }
         }
 
         table.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 if (e.clickCount == 2) {
-                    val row = table.rowAtPoint(e.point)
-                    if (row >= 0 && row < currentFindings.size) {
-                        navigateToFinding(tableModel.getFinding(row))
+                    val viewRow = table.rowAtPoint(e.point)
+                    if (viewRow >= 0) {
+                        val modelRow = table.convertRowIndexToModel(viewRow)
+                        if (modelRow >= 0 && modelRow < currentFindings.size) {
+                            navigateToFinding(tableModel.getFinding(modelRow))
+                        }
                     }
                 }
             }
@@ -115,9 +121,12 @@ class SecurityFindingsPanel(private val project: Project) {
         table.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
                 if (e.keyCode == KeyEvent.VK_ENTER) {
-                    val row = table.selectedRow
-                    if (row >= 0 && row < currentFindings.size) {
-                        navigateToFinding(tableModel.getFinding(row))
+                    val viewRow = table.selectedRow
+                    if (viewRow >= 0) {
+                        val modelRow = table.convertRowIndexToModel(viewRow)
+                        if (modelRow >= 0 && modelRow < currentFindings.size) {
+                            navigateToFinding(tableModel.getFinding(modelRow))
+                        }
                     }
                     e.consume()
                 }
@@ -401,28 +410,37 @@ class SecurityFindingsPanel(private val project: Project) {
 
     fun showFindings(findings: List<Finding>) {
         ApplicationManager.getApplication().invokeLater {
-            // Filter out findings with no description AND no file path (incomplete results)
-            // Deduplicate by file+line (same location = same finding, even if different type/title)
-            val seen = mutableSetOf<String>()
-            val filtered = findings.filter { f ->
-                val hasDesc = f.vulnerability.isNotBlank()
-                val hasFile = f.filePath.isNotBlank() || f.fileName.isNotBlank()
-                if (!hasDesc && !hasFile) return@filter false
-                val key = "${f.fileName}|${f.line}"
-                seen.add(key)
-            }
-            currentFindings = filtered
-            tableModel.setFindings(filtered)
-            val critical = filtered.count { it.severity == Severity.CRITICAL }
-            val high = filtered.count { it.severity == Severity.HIGH }
-            val medium = filtered.count { it.severity == Severity.MEDIUM }
-            val low = filtered.count { it.severity == Severity.LOW }
-            statusLabel.text = if (filtered.isEmpty()) {
-                "No findings"
+            // RECONCILIATION CONTRACT (2026-04-08):
+            //   The tool window shows EXACTLY what the server returned — no filtering,
+            //   no dedup, no client-side drops. UI count == server count, always.
+            //   The post-render assertion below logs a warning if drift ever occurs.
+            //
+            // Wipe first so stale rows from a previous scan can never leak through.
+            tableModel.setFindings(emptyList())
+            currentFindings = emptyList()
+
+            // Replace the entire list with the server response as-is. No filter.
+            currentFindings = findings
+            tableModel.setFindings(findings)
+
+            val critical = findings.count { it.severity == Severity.CRITICAL }
+            val high = findings.count { it.severity == Severity.HIGH }
+            val medium = findings.count { it.severity == Severity.MEDIUM }
+            val low = findings.count { it.severity == Severity.LOW }
+
+            // Reconciliation assertion: the UI table must now contain exactly findings.size rows.
+            val uiCount = tableModel.rowCount
+            if (uiCount != findings.size) {
+                statusLabel.text = "WARN: count drift - server=${findings.size}, ui=$uiCount"
             } else {
-                "${filtered.size} findings \u2014 Critical: $critical  High: $high  Medium: $medium  Low: $low"
+                statusLabel.text = if (findings.isEmpty()) {
+                    "No findings"
+                } else {
+                    "${findings.size} findings \u2014 Critical: $critical  High: $high  Medium: $medium  Low: $low"
+                }
             }
-            if (filtered.isNotEmpty()) table.setRowSelectionInterval(0, 0)
+
+            if (findings.isNotEmpty()) table.setRowSelectionInterval(0, 0)
         }
     }
 
@@ -712,31 +730,67 @@ class SecurityFindingsPanel(private val project: Project) {
     private fun navigateToFinding(finding: Finding) {
         ApplicationManager.getApplication().invokeLater {
             val vf: VirtualFile? = findVirtualFile(finding)
-            if (vf != null) {
-                val fileEditorManager = FileEditorManager.getInstance(project)
-                fileEditorManager.openFile(vf, true)
-                val editor = fileEditorManager.selectedTextEditor ?: return@invokeLater
-                val line = (finding.line - 1).coerceAtLeast(0)
-                val doc = editor.document
-                if (line < doc.lineCount) {
-                    val offset = doc.getLineStartOffset(line)
-                    editor.caretModel.moveToOffset(offset)
-                    editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.CENTER)
-                }
+            if (vf == null) {
+                javax.swing.JOptionPane.showMessageDialog(
+                    null as java.awt.Component?,
+                    "Could not locate the source file for this finding in the current project.\n\n" +
+                    "File: ${if (finding.filePath.isNotBlank()) finding.filePath else finding.fileName}\n" +
+                    "Line: ${finding.line}\n\n" +
+                    "This finding may have come from a dashboard project uploaded from a different folder\n" +
+                    "layout. Open the matching source file manually, or re-scan this project from the IDE\n" +
+                    "so paths match your local layout.",
+                    "Offensive 360 — Navigation",
+                    javax.swing.JOptionPane.INFORMATION_MESSAGE
+                )
+                return@invokeLater
+            }
+            val fileEditorManager = FileEditorManager.getInstance(project)
+            fileEditorManager.openFile(vf, true)
+            val editor = fileEditorManager.selectedTextEditor ?: return@invokeLater
+            val line = (finding.line - 1).coerceAtLeast(0)
+            val doc = editor.document
+            if (line < doc.lineCount) {
+                val offset = doc.getLineStartOffset(line)
+                editor.caretModel.moveToOffset(offset)
+                editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.CENTER)
             }
         }
     }
 
     private fun findVirtualFile(finding: Finding): VirtualFile? {
-        // Try full path first
+        val lfs = LocalFileSystem.getInstance()
+        // 1) Try the raw filePath as-is (absolute local path).
         if (finding.filePath.isNotBlank()) {
-            LocalFileSystem.getInstance().findFileByPath(finding.filePath)?.let { return it }
+            lfs.findFileByPath(finding.filePath)?.let { return it }
         }
-        // Search by file name in project
+
         val roots = com.intellij.openapi.roots.ProjectRootManager.getInstance(project).contentRoots
-        for (root in roots) {
-            val found = findInTree(root, finding.fileName)
-            if (found != null) return found
+        val rel = finding.filePath.replace('\\', '/').trimStart('/')
+
+        // 2) Try relative path under each content root, stripping zip-prefix segments.
+        //    Project-agnostic: no hardcoded project name.
+        if (rel.isNotBlank()) {
+            val parts = rel.split('/')
+            for (root in roots) {
+                val rootPath = root.path.trimEnd('/')
+                // Full relative first
+                lfs.findFileByPath("$rootPath/$rel")?.let { return it }
+                // Then progressively strip leading segments (handles "Foo-master/src/..." prefixes).
+                for (start in 1 until parts.size) {
+                    val sub = parts.subList(start, parts.size).joinToString("/")
+                    lfs.findFileByPath("$rootPath/$sub")?.let { return it }
+                }
+            }
+        }
+
+        // 3) Final fallback: recursive basename search.
+        val basename = if (finding.fileName.isNotBlank()) finding.fileName
+                       else rel.substringAfterLast('/')
+        if (basename.isNotBlank()) {
+            for (root in roots) {
+                val found = findInTree(root, basename)
+                if (found != null) return found
+            }
         }
         return null
     }
@@ -787,9 +841,12 @@ class SecurityFindingsPanel(private val project: Project) {
         ): Component {
             val comp = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
             if (column == 0 && !isSelected) {
-                val finding = tableModel.getFinding(row)
-                background = Color.decode(finding.severity.color).let {
-                    Color(it.red, it.green, it.blue, 60)
+                val modelRow = table.convertRowIndexToModel(row)
+                if (modelRow in 0 until tableModel.rowCount) {
+                    val finding = tableModel.getFinding(modelRow)
+                    background = Color.decode(finding.severity.color).let {
+                        Color(it.red, it.green, it.blue, 60)
+                    }
                 }
             }
             return comp
